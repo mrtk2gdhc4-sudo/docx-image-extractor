@@ -24,26 +24,47 @@ def health():
 def extract_docx():
     """
     POST /extract
-    Body: { "file_base64": "...", "filename": "book.docx" }
-    Returns: { 
+    Accepts EITHER:
+      - multipart/form-data with a file field named "file"
+      - JSON body: { "file_base64": "...", "filename": "book.docx" }
+    Returns: {
         "text_with_markers": "...",
-        "images": [{"name": "image1.png", "data_base64": "...", "mime_type": "image/png"}],
-        "image_count": N
+        "images": [...],
+        "image_count": N,
+        ...
     }
     """
     try:
-        data = request.json
-        if not data or 'file_base64' not in data:
-            return jsonify({'error': 'Missing file_base64'}), 400
+        docx_bytes = None
+        filename = 'unknown.docx'
 
-        docx_b64 = data['file_base64']
-        filename = data.get('filename', 'unknown.docx')
+        # Method 1: multipart file upload (preferred for n8n)
+        if 'file' in request.files:
+            uploaded_file = request.files['file']
+            docx_bytes = uploaded_file.read()
+            filename = uploaded_file.filename or 'upload.docx'
 
-        # Decode the file
-        try:
-            docx_bytes = base64.b64decode(docx_b64)
-        except Exception as e:
-            return jsonify({'error': f'Invalid base64: {str(e)}'}), 400
+        # Method 2: JSON with base64 (kept for compatibility)
+        elif request.is_json:
+            data = request.json
+            if not data or 'file_base64' not in data:
+                return jsonify({'error': 'Missing file_base64 or file upload'}), 400
+            docx_b64 = data['file_base64']
+            filename = data.get('filename', 'unknown.docx')
+            try:
+                docx_bytes = base64.b64decode(docx_b64)
+            except Exception as e:
+                return jsonify({'error': f'Invalid base64: {str(e)}'}), 400
+
+        else:
+            return jsonify({
+                'error': 'No file provided. Send as multipart/form-data with field "file", or as JSON with field "file_base64".'
+            }), 400
+
+        if not docx_bytes or len(docx_bytes) < 100:
+            return jsonify({
+                'error': f'File is empty or too small ({len(docx_bytes) if docx_bytes else 0} bytes)'
+            }), 400
 
         docx_io = io.BytesIO(docx_bytes)
 
@@ -53,25 +74,30 @@ def extract_docx():
         images = []
         image_filenames_in_order = []
 
-        with zipfile.ZipFile(docx_io, 'r') as z:
-            # Get all media files
-            media_files = sorted([
-                f for f in z.namelist() 
-                if f.startswith('word/media/')
-            ])
+        try:
+            with zipfile.ZipFile(docx_io, 'r') as z:
+                media_files = sorted([
+                    f for f in z.namelist()
+                    if f.startswith('word/media/')
+                ])
 
-            for media_path in media_files:
-                image_data = z.read(media_path)
-                image_name = os.path.basename(media_path)
+                for media_path in media_files:
+                    image_data = z.read(media_path)
+                    image_name = os.path.basename(media_path)
 
-                images.append({
-                    'name': image_name,
-                    'original_path': media_path,
-                    'data_base64': base64.b64encode(image_data).decode('utf-8'),
-                    'mime_type': guess_mime(image_name),
-                    'size_bytes': len(image_data)
-                })
-                image_filenames_in_order.append(image_name)
+                    images.append({
+                        'name': image_name,
+                        'original_path': media_path,
+                        'data_base64': base64.b64encode(image_data).decode('utf-8'),
+                        'mime_type': guess_mime(image_name),
+                        'size_bytes': len(image_data)
+                    })
+                    image_filenames_in_order.append(image_name)
+        except zipfile.BadZipFile:
+            preview = docx_bytes[:50] if docx_bytes else b''
+            return jsonify({
+                'error': f'File is not a valid .docx (not a ZIP). Received {len(docx_bytes)} bytes. Preview: {preview}'
+            }), 400
 
         # ------------------------------------------------------------
         # STEP 2: Walk through document and insert image markers
@@ -83,11 +109,9 @@ def extract_docx():
         image_counter = 0
         marker_to_image = {}
 
-        # Walk paragraphs and insert markers where images appear
         for para in doc.paragraphs:
             para_has_image = False
 
-            # Check for inline images (drawings)
             for run in para.runs:
                 drawings = run.element.findall('.//' + qn('w:drawing'))
                 for _ in drawings:
@@ -98,15 +122,12 @@ def extract_docx():
                         marker_to_image[marker] = image_filenames_in_order[image_counter - 1]
                     para_has_image = True
 
-            # Add paragraph text
             if para.text.strip():
                 text_parts.append(para.text)
             elif not para_has_image:
                 text_parts.append('')
 
         full_text = '\n\n'.join(text_parts)
-
-        # Clean up: collapse 3+ consecutive blank lines into 2
         full_text = re.sub(r'\n{3,}', '\n\n', full_text).strip()
 
         return jsonify({
@@ -115,12 +136,15 @@ def extract_docx():
             'image_count': image_counter,
             'marker_to_image': marker_to_image,
             'filename': filename,
+            'received_bytes': len(docx_bytes),
             'success': True
         })
 
     except Exception as e:
+        import traceback
         return jsonify({
             'error': str(e),
+            'traceback': traceback.format_exc(),
             'success': False
         }), 500
 
