@@ -1,7 +1,7 @@
 """
 DOCX Image Extractor + Editor + Trim Detector Service
 - /health      : status check
-- /extract     : extracts text + images from .docx (legacy v1)
+- /extract     : extracts text + images from .docx
 - /edit-docx   : edit text in-place preserving images and layout
 - /detect-trim : detect trim size and margins from .docx
 """
@@ -9,7 +9,6 @@ DOCX Image Extractor + Editor + Trim Detector Service
 from flask import Flask, request, jsonify, send_file
 from docx import Document
 from docx.oxml.ns import qn
-from openai import OpenAI
 import zipfile
 import base64
 import io
@@ -18,12 +17,21 @@ import re
 
 app = Flask(__name__)
 
-openai_client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY'))
+# Lazy OpenAI client - only loaded when actually needed
+# This way the service starts even without OPENAI_API_KEY set
+_openai_client = None
+
+def get_openai_client():
+    global _openai_client
+    if _openai_client is None:
+        api_key = os.environ.get('OPENAI_API_KEY')
+        if not api_key:
+            raise RuntimeError('OPENAI_API_KEY not set in Render environment')
+        from openai import OpenAI
+        _openai_client = OpenAI(api_key=api_key)
+    return _openai_client
 
 
-# ============================================================
-# HEALTH
-# ============================================================
 @app.route('/health', methods=['GET'])
 def health():
     has_openai = bool(os.environ.get('OPENAI_API_KEY'))
@@ -35,9 +43,6 @@ def health():
     })
 
 
-# ============================================================
-# LEGACY EXTRACT (for v1 illustrated workflow)
-# ============================================================
 @app.route('/extract', methods=['POST'])
 def extract_docx():
     try:
@@ -58,7 +63,7 @@ def extract_docx():
             return jsonify({'error': 'No file provided'}), 400
 
         if not docx_bytes or len(docx_bytes) < 100:
-            return jsonify({'error': f'File too small'}), 400
+            return jsonify({'error': 'File too small'}), 400
 
         docx_io = io.BytesIO(docx_bytes)
         images = []
@@ -121,28 +126,22 @@ def extract_docx():
         return jsonify({'error': str(e), 'traceback': traceback.format_exc(), 'success': False}), 500
 
 
-# ============================================================
-# EDIT IN PLACE (for v2 illustrated workflow — preserves layout)
-# ============================================================
 EDIT_SYSTEM_PROMPT = """You are a professional copyeditor. You will receive paragraphs of book text, one paragraph per line, numbered. For EACH numbered paragraph, return the edited version with the same number.
 
 EDITING RULES:
 - Fix grammar, punctuation, capitalization, hyphenation, obvious typos
 - Preserve the author's voice exactly (sentence fragments, polysyndeton, repetition for emphasis)
 - Preserve dialogue exactly (only fix capitalization at start of quotes)
-- Preserve all paragraph numbers — never merge or split paragraphs
+- Preserve all paragraph numbers - never merge or split paragraphs
 - If a paragraph is already correct, return it unchanged
-- If a paragraph is empty or just whitespace, return empty
 - DO NOT add commentary, headers, or markdown
 - DO NOT rewrite for style
 
-OUTPUT FORMAT (critical):
-Return paragraphs in this exact format:
+OUTPUT FORMAT:
 [1] edited paragraph 1 text
 [2] edited paragraph 2 text
-[3] edited paragraph 3 text
 
-One paragraph per line. The number in [N] must match the input number exactly.
+The number in [N] must match the input number exactly.
 """
 
 
@@ -156,7 +155,7 @@ def edit_paragraphs_batch(paragraphs_with_indices):
         lines.append(f'[{idx}] {clean_text}')
     user_message = '\n'.join(lines)
 
-    response = openai_client.chat.completions.create(
+    response = get_openai_client().chat.completions.create(
         model='gpt-4o',
         temperature=0.3,
         max_tokens=4000,
@@ -175,7 +174,6 @@ def edit_paragraphs_batch(paragraphs_with_indices):
         match = re.match(r'^\[(\d+)\]\s*(.*)$', line)
         if match:
             result[int(match.group(1))] = match.group(2)
-
     return result
 
 
@@ -185,10 +183,8 @@ def update_paragraph_text(para, new_text):
         has_drawing = run.element.findall('.//' + qn('w:drawing'))
         if not has_drawing:
             text_only_runs.append(run)
-
     if not text_only_runs:
         return
-
     for run in text_only_runs:
         run.text = ''
     text_only_runs[0].text = new_text
@@ -238,11 +234,9 @@ def edit_docx():
                 return jsonify({
                     'error': f'GPT-4o failed on batch {batch_count}: {str(e)}',
                     'batches_completed': batch_count - 1,
-                    'paragraphs_attempted': batch_start + len(batch)
                 }), 500
 
         edits_applied = 0
-        edits_skipped = 0
         for idx, original_text in paragraphs_to_edit:
             if idx in all_edits:
                 edited_text = all_edits[idx]
@@ -250,10 +244,6 @@ def edit_docx():
                 if 0.5 <= ratio <= 1.8:
                     update_paragraph_text(doc.paragraphs[idx], edited_text)
                     edits_applied += 1
-                else:
-                    edits_skipped += 1
-            else:
-                edits_skipped += 1
 
         output_io = io.BytesIO()
         doc.save(output_io)
@@ -267,7 +257,6 @@ def edit_docx():
             download_name=f'edited_{filename}',
         ), 200, {
             'X-Edits-Applied': str(edits_applied),
-            'X-Edits-Skipped': str(edits_skipped),
             'X-Total-Paragraphs': str(total_paragraphs),
             'X-Batches': str(batch_count),
         }
@@ -277,16 +266,8 @@ def edit_docx():
         return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
 
 
-# ============================================================
-# TRIM SIZE DETECTION
-# ============================================================
 @app.route('/detect-trim', methods=['POST'])
 def detect_trim():
-    """
-    POST /detect-trim
-    Accepts a .docx via multipart upload (field 'file').
-    Returns trim size and margins in inches.
-    """
     try:
         if 'file' not in request.files:
             return jsonify({'error': 'No file uploaded'}), 400
@@ -319,15 +300,8 @@ def detect_trim():
         margin_outside = margin_right or 0
 
         common_sizes = [
-            (4.25, 6.87),
-            (5.0, 8.0),
-            (5.06, 7.81),
-            (5.25, 8.0),
-            (5.5, 8.5),
-            (6.0, 9.0),
-            (6.14, 9.21),
-            (7.0, 10.0),
-            (8.5, 11.0),
+            (4.25, 6.87), (5.0, 8.0), (5.06, 7.81), (5.25, 8.0),
+            (5.5, 8.5), (6.0, 9.0), (6.14, 9.21), (7.0, 10.0), (8.5, 11.0),
         ]
 
         snapped = False
@@ -353,10 +327,7 @@ def detect_trim():
             'gutter': gutter,
             'snapped_to_standard': snapped,
             'detected_size_label': f'{trim_width} x {trim_height} inches',
-            'original_measurements': {
-                'width': original_w,
-                'height': original_h
-            }
+            'original_measurements': {'width': original_w, 'height': original_h}
         })
 
     except Exception as e:
@@ -368,9 +339,6 @@ def detect_trim():
         }), 500
 
 
-# ============================================================
-# HELPERS
-# ============================================================
 def guess_mime(filename):
     ext = filename.lower().rsplit('.', 1)[-1]
     return {
