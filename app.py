@@ -9,6 +9,7 @@ from docx.shared import Inches
 
 app = Flask(__name__)
 
+# Cache the client
 _anthropic_client = None
 
 def get_anthropic_client():
@@ -19,11 +20,10 @@ def get_anthropic_client():
     return _anthropic_client
 
 def apply_formatting(doc, width, height):
-    """Automatically sets the physical trim size of the book."""
+    """Sets physical trim and professional margins."""
     for section in doc.sections:
         section.page_width = Inches(float(width))
         section.page_height = Inches(float(height))
-        # Standard professional margins
         section.top_margin = Inches(0.75)
         section.bottom_margin = Inches(0.75)
         section.left_margin = Inches(0.75)
@@ -34,75 +34,81 @@ def edit_paragraphs_batch(batch_items, dynamic_system_prompt):
         return {}
 
     lines = [f"[{idx}] {text}" for idx, text in batch_items]
-    user_message = "Please edit the following paragraphs:\n" + '\n'.join(lines)
+    user_message = "ACT AS AN EDITOR. FIX ALL ERRORS IN THESE PARAGRAPHS:\n" + '\n'.join(lines)
 
-    # We force the AI to be an ACTIVE editor here
-    base_instructions = """You are a Master Book Editor. 
-    EXPECTATION: You must actively repair the text while keeping the author's soul intact.
-    REQUIRED ACTIONS:
-    - FIX OCR: Change 'err0rs' to 'errors', 'Th1s' to 'This'.
-    - FIX SPACING: Add spaces after punctuation and repair 'smushedtext' into 'smushed text'.
-    - FIX REPETITION: Delete accidental double words like 'the the'.
-    - NORMALIZE: Ensure lists and dialogue are punctuated professionally.
-    - REJECT: Do not preserve obvious technical failures as 'voice'."""
-
-    final_prompt = f"{base_instructions}\n\nCLIENT SPECIFIC RULES:\n{dynamic_system_prompt}"
+    # FORCE Claude to be aggressive
+    system_instruction = (
+        "You are an ELITE MANUSCRIPT EDITOR. You have zero tolerance for technical errors.\n"
+        "MANDATORY ACTIONS:\n"
+        "- FIX OCR: 'Th1s' -> 'This', 'err0rs' -> 'errors'.\n"
+        "- FIX REPETITION: Remove double words like 'however however'.\n"
+        "- FIX SPACING: Repair 'word,word' and 'smushedtext'.\n"
+        "Stay true to the author's story, but CLEAN THE TEXT COMPLETELY.\n"
+        f"CONTEXT: {dynamic_system_prompt}\n"
+        "Format: [N] edited text."
+    )
 
     try:
-        response = get_anthropic_client().messages.create(
+        client = get_anthropic_client()
+        response = client.messages.create(
             model="claude-3-5-sonnet-20240620",
             max_tokens=4000,
-            temperature=0.2, # Lower temperature = more precise editing
-            system=final_prompt,
+            temperature=0, # 0 = NO CREATIVITY, ONLY ACCURACY
+            system=system_instruction,
             messages=[{'role': 'user', 'content': user_message}],
         )
-        edited_content = response.content[0].text.strip()
         
         results = {}
-        for line in edited_content.split('\n'):
+        for line in response.content[0].text.strip().split('\n'):
             match = re.match(r'^\[(\d+)\]\s*(.*)$', line.strip())
             if match:
                 results[int(match.group(1))] = match.group(2)
         return results
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Claude Error: {e}")
         return {}
 
 @app.route('/edit-docx', methods=['POST'])
 def edit_docx():
     try:
-        # 1. Get data from n8n
         uploaded_file = request.files['file']
-        sys_prompt = request.form.get('system_prompt', "")
+        sys_prompt = request.form.get('system_prompt', "Professional editing.")
         t_width = request.form.get('trim_width', 6)
         t_height = request.form.get('trim_height', 9)
 
         doc = Document(io.BytesIO(uploaded_file.read()))
         
-        # 2. APPLY TRIM SIZE IMMEDIATELY
+        # 1. Physical Formatting
         apply_formatting(doc, t_width, t_height)
 
-        paragraphs_to_edit = [(i, p.text.strip()) for i, p in enumerate(doc.paragraphs) if len(p.text.strip()) > 1]
+        # 2. Extract content (Index, Text)
+        to_edit = []
+        for i, p in enumerate(doc.paragraphs):
+            clean_text = p.text.strip()
+            if len(clean_text) > 1:
+                to_edit.append((i, clean_text))
 
-        # 3. Process with AI
-        all_edits = {}
-        batch_size = 10 # Smaller batches for higher quality
-        for i in range(0, len(paragraphs_to_edit), batch_size):
-            batch = paragraphs_to_edit[i : i + batch_size]
+        # 3. Batch Edit
+        batch_size = 8 # Smaller batches = higher attention to detail
+        for i in range(0, len(to_edit), batch_size):
+            batch = to_edit[i : i + batch_size]
             edits = edit_paragraphs_batch(batch, sys_prompt)
-            all_edits.update(edits)
+            
+            # 4. DIRECT OVERWRITE
+            for idx, _ in batch:
+                if idx in edits:
+                    # This replaces the text while keeping the paragraph object
+                    doc.paragraphs[idx].text = edits[idx]
+            
             gc.collect()
 
-        # 4. Apply back to doc (Removed the strict length filter)
-        for idx, _ in paragraphs_to_edit:
-            if idx in all_edits:
-                doc.paragraphs[idx].text = all_edits[idx]
-
+        # 5. Final Export
         out_io = io.BytesIO()
         doc.save(out_io)
         out_io.seek(0)
         
-        return send_file(out_io, mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document', as_attachment=True, download_name="edited_book.docx")
+        return send_file(out_io, mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document', as_attachment=True, download_name="edited_manuscript.docx")
 
     except Exception as e:
+        print(f"Global Error: {e}")
         return jsonify({'error': str(e)}), 500
