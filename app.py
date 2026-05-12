@@ -2,25 +2,29 @@ import os
 import io
 import time
 import json
+import uuid
+import threading
 import requests
 import anthropic
 from flask import Flask, request, jsonify, send_file
 from docx import Document
-from docx.oxml.ns import qn
-import copy
 
 app = Flask(__name__)
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 CLOUDCONVERT_API_KEY = os.environ.get("CLOUDCONVERT_API_KEY")
 
 CHUNK_SIZE = 20
+jobs = {}
+
+
+# ─── HEALTH ──────────────────────────────────────────────────────────────────
 
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
 
 
-# ─── ORIGINAL EDIT ENDPOINT (kept for small books) ──────────────────────────
+# ─── ORIGINAL EDIT (small books under 10k words) ─────────────────────────────
 
 @app.route("/edit-docx", methods=["POST"])
 def edit_docx():
@@ -30,16 +34,11 @@ def edit_docx():
     uploaded_file = request.files["file"]
     custom_prompt = request.form.get("system_prompt", "").strip()
 
-    if custom_prompt:
-        system_prompt = custom_prompt
-    else:
-        system_prompt = (
-            "You are a professional book editor. "
-            "Fix grammar, punctuation, and awkward phrasing. "
-            "Preserve the author's voice. "
-            "Return ONLY the edited text with paragraphs separated by <<<PARA>>>. "
-            "Do not summarize or truncate."
-        )
+    system_prompt = custom_prompt if custom_prompt else (
+        "You are a professional book editor. Fix grammar, punctuation, and awkward phrasing. "
+        "Preserve the author's voice. Return ONLY the edited text with paragraphs separated by <<<PARA>>>. "
+        "Do not summarize or truncate."
+    )
 
     try:
         file_bytes = uploaded_file.read()
@@ -52,8 +51,7 @@ def edit_docx():
 
     for start in range(0, total, CHUNK_SIZE):
         chunk = paragraphs[start: start + CHUNK_SIZE]
-        texts = []
-        indices = []
+        texts, indices = [], []
         for i, para in enumerate(chunk):
             text = para.text.strip()
             if text:
@@ -71,14 +69,11 @@ def edit_docx():
                     "Return same number of paragraphs separated by <<<PARA>>>. "
                     "Do NOT merge paragraphs."
                 ),
-                messages=[{
-                    "role": "user",
-                    "content": (
-                        f"Edit these {len(texts)} paragraphs. "
-                        f"Return exactly {len(texts)} edited paragraphs separated by <<<PARA>>>.\n\n"
-                        f"{chunk_text}"
-                    )
-                }]
+                messages=[{"role": "user", "content": (
+                    f"Edit these {len(texts)} paragraphs. "
+                    f"Return exactly {len(texts)} edited paragraphs separated by <<<PARA>>>.\n\n"
+                    f"{chunk_text}"
+                )}]
             )
             edited_text = message.content[0].text.strip()
         except Exception as e:
@@ -88,13 +83,12 @@ def edit_docx():
         for j, idx in enumerate(indices):
             if j < len(edited_paras):
                 para = chunk[idx]
-                new_text = edited_paras[j]
                 if para.runs:
-                    para.runs[0].text = new_text
+                    para.runs[0].text = edited_paras[j]
                     for run in para.runs[1:]:
                         run.text = ""
                 else:
-                    para.text = new_text
+                    para.text = edited_paras[j]
 
     output = io.BytesIO()
     doc.save(output)
@@ -107,13 +101,143 @@ def edit_docx():
     )
 
 
-# ─── NEW: EXTRACT PARAGRAPHS ─────────────────────────────────────────────────
+# ─── ASYNC EDIT (large books) ─────────────────────────────────────────────────
+
+def process_job(job_id, file_bytes, system_prompt):
+    jobs[job_id]["status"] = "processing"
+    try:
+        doc = Document(io.BytesIO(file_bytes))
+        paragraphs = doc.paragraphs
+        total = len(paragraphs)
+        jobs[job_id]["total_chunks"] = (total // CHUNK_SIZE) + 1
+        jobs[job_id]["completed_chunks"] = 0
+
+        for start in range(0, total, CHUNK_SIZE):
+            chunk = paragraphs[start: start + CHUNK_SIZE]
+            texts, indices = [], []
+            for i, para in enumerate(chunk):
+                text = para.text.strip()
+                if text:
+                    texts.append(text)
+                    indices.append(i)
+            if not texts:
+                jobs[job_id]["completed_chunks"] += 1
+                continue
+
+            chunk_text = " <<<PARA>>> ".join(texts)
+            try:
+                message = client.messages.create(
+                    model="claude-sonnet-4-5",
+                    max_tokens=4096,
+                    system=system_prompt + (
+                        "\n\nCRITICAL: Input paragraphs are separated by <<<PARA>>>. "
+                        "Return same number of paragraphs separated by <<<PARA>>>. "
+                        "Do NOT merge paragraphs."
+                    ),
+                    messages=[{"role": "user", "content": (
+                        f"Edit these {len(texts)} paragraphs. "
+                        f"Return exactly {len(texts)} edited paragraphs separated by <<<PARA>>>.\n\n"
+                        f"{chunk_text}"
+                    )}]
+                )
+                edited_text = message.content[0].text.strip()
+            except Exception as e:
+                jobs[job_id]["status"] = "error"
+                jobs[job_id]["error"] = f"Claude API error at chunk {start}: {str(e)}"
+                return
+
+            edited_paras = [p.strip() for p in edited_text.split("<<<PARA>>>")]
+            for j, idx in enumerate(indices):
+                if j < len(edited_paras):
+                    para = chunk[idx]
+                    if para.runs:
+                        para.runs[0].text = edited_paras[j]
+                        for run in para.runs[1:]:
+                            run.text = ""
+                    else:
+                        para.text = edited_paras[j]
+
+            jobs[job_id]["completed_chunks"] += 1
+
+        output = io.BytesIO()
+        doc.save(output)
+        jobs[job_id]["result"] = output.getvalue()
+        jobs[job_id]["status"] = "done"
+
+    except Exception as e:
+        jobs[job_id]["status"] = "error"
+        jobs[job_id]["error"] = str(e)
+
+
+@app.route("/edit-docx-async", methods=["POST"])
+def edit_docx_async():
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+
+    file_bytes = request.files["file"].read()
+    system_prompt = request.form.get("system_prompt", "").strip()
+
+    if not system_prompt:
+        system_prompt = (
+            "You are a professional book editor. Fix grammar, punctuation, and awkward phrasing. "
+            "Preserve the author's voice. Return ONLY the edited text with paragraphs separated by <<<PARA>>>. "
+            "Do not summarize or truncate."
+        )
+
+    job_id = str(uuid.uuid4())
+    jobs[job_id] = {
+        "status": "queued",
+        "created_at": time.time(),
+        "total_chunks": 0,
+        "completed_chunks": 0,
+        "result": None,
+        "error": None
+    }
+
+    thread = threading.Thread(target=process_job, args=(job_id, file_bytes, system_prompt))
+    thread.daemon = True
+    thread.start()
+
+    return jsonify({"job_id": job_id, "status": "queued"})
+
+
+@app.route("/job-status/<job_id>", methods=["GET"])
+def job_status(job_id):
+    if job_id not in jobs:
+        return jsonify({"error": "Job not found"}), 404
+    job = jobs[job_id]
+    return jsonify({
+        "job_id": job_id,
+        "status": job["status"],
+        "total_chunks": job["total_chunks"],
+        "completed_chunks": job["completed_chunks"],
+        "error": job.get("error")
+    })
+
+
+@app.route("/job-result/<job_id>", methods=["GET"])
+def job_result(job_id):
+    if job_id not in jobs:
+        return jsonify({"error": "Job not found"}), 404
+    job = jobs[job_id]
+    if job["status"] != "done":
+        return jsonify({"error": f"Job not done yet — status: {job['status']}"}), 400
+    result_bytes = job["result"]
+    del jobs[job_id]
+    return send_file(
+        io.BytesIO(result_bytes),
+        mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        as_attachment=True,
+        download_name="edited.docx"
+    )
+
+
+# ─── EXTRACT PARAGRAPHS ───────────────────────────────────────────────────────
 
 @app.route("/extract-paragraphs", methods=["POST"])
 def extract_paragraphs():
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
-
     try:
         file_bytes = request.files["file"].read()
         doc = Document(io.BytesIO(file_bytes))
@@ -128,14 +252,10 @@ def extract_paragraphs():
             "style": para.style.name,
             "empty": len(para.text.strip()) == 0
         })
-
-    return jsonify({
-        "total": len(paragraphs),
-        "paragraphs": paragraphs
-    })
+    return jsonify({"total": len(paragraphs), "paragraphs": paragraphs})
 
 
-# ─── NEW: EDIT BATCH ─────────────────────────────────────────────────────────
+# ─── EDIT BATCH ───────────────────────────────────────────────────────────────
 
 @app.route("/edit-batch", methods=["POST"])
 def edit_batch():
@@ -144,9 +264,7 @@ def edit_batch():
         return jsonify({"error": "No JSON body"}), 400
 
     paragraphs = data.get("paragraphs", [])
-    system_prompt = data.get("system_prompt", "You are a professional book editor. Fix grammar and punctuation. Preserve the author's voice.")
-
-    # Only edit non-empty paragraphs
+    system_prompt = data.get("system_prompt", "You are a professional book editor.")
     editable = [p for p in paragraphs if not p.get("empty") and p.get("text", "").strip()]
 
     if not editable:
@@ -164,22 +282,17 @@ def edit_batch():
                 "Return exactly the same number of paragraphs separated by <<<PARA>>>. "
                 "Do NOT merge, add, or remove paragraphs."
             ),
-            messages=[{
-                "role": "user",
-                "content": (
-                    f"Edit these {len(texts)} paragraphs. "
-                    f"Return exactly {len(texts)} edited paragraphs separated by <<<PARA>>>.\n\n"
-                    f"{chunk_text}"
-                )
-            }]
+            messages=[{"role": "user", "content": (
+                f"Edit these {len(texts)} paragraphs. "
+                f"Return exactly {len(texts)} edited paragraphs separated by <<<PARA>>>.\n\n"
+                f"{chunk_text}"
+            )}]
         )
         edited_text = message.content[0].text.strip()
     except Exception as e:
         return jsonify({"error": f"Claude API error: {str(e)}"}), 500
 
     edited_paras = [p.strip() for p in edited_text.split("<<<PARA>>>")]
-
-    # Map edited text back to original paragraph indices
     result = list(paragraphs)
     for j, para in enumerate(editable):
         if j < len(edited_paras):
@@ -189,7 +302,7 @@ def edit_batch():
     return jsonify({"paragraphs": result})
 
 
-# ─── NEW: REBUILD DOCX ───────────────────────────────────────────────────────
+# ─── REBUILD DOCX ─────────────────────────────────────────────────────────────
 
 @app.route("/rebuild-docx", methods=["POST"])
 def rebuild_docx():
@@ -209,10 +322,7 @@ def rebuild_docx():
     except Exception as e:
         return jsonify({"error": f"Invalid paragraphs JSON: {str(e)}"}), 400
 
-    # Build lookup by index
     edited_map = {p["index"]: p["text"] for p in edited_paragraphs if p.get("edited")}
-
-    # Write back to doc
     for i, para in enumerate(doc.paragraphs):
         if i in edited_map:
             new_text = edited_map[i]
@@ -226,7 +336,6 @@ def rebuild_docx():
     output = io.BytesIO()
     doc.save(output)
     output.seek(0)
-
     return send_file(
         output,
         mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -235,7 +344,7 @@ def rebuild_docx():
     )
 
 
-# ─── CONVERT TO PDF ──────────────────────────────────────────────────────────
+# ─── CONVERT TO PDF ───────────────────────────────────────────────────────────
 
 @app.route("/convert-to-pdf", methods=["POST"])
 def convert_to_pdf():
@@ -276,9 +385,7 @@ def convert_to_pdf():
     try:
         job_resp = requests.post(
             "https://api.cloudconvert.com/v2/jobs",
-            json=job_payload,
-            headers=headers,
-            timeout=30
+            json=job_payload, headers=headers, timeout=30
         )
         job_data = job_resp.json()
     except Exception as e:
@@ -298,9 +405,8 @@ def convert_to_pdf():
         return jsonify({"error": "No upload URL from CloudConvert"}), 500
 
     try:
-        upload_resp = requests.post(
-            upload_url,
-            data=upload_params,
+        requests.post(
+            upload_url, data=upload_params,
             files={"file": (filename, file_bytes, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
             timeout=60
         )
@@ -315,15 +421,13 @@ def convert_to_pdf():
         try:
             status_resp = requests.get(
                 f"https://api.cloudconvert.com/v2/jobs/{job_id}",
-                headers=headers,
-                timeout=15
+                headers=headers, timeout=15
             )
             status_data = status_resp.json()
             job_status = status_data.get("data", {}).get("status")
             if job_status == "finished":
                 export_task = next(
-                    (t for t in status_data["data"]["tasks"] if t.get("name") == "export-file"),
-                    None
+                    (t for t in status_data["data"]["tasks"] if t.get("name") == "export-file"), None
                 )
                 if export_task:
                     pdf_url = export_task["result"]["files"][0]["url"]
