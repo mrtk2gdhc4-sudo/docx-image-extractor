@@ -17,14 +17,10 @@ CHUNK_SIZE = 20
 jobs = {}
 
 
-# ─── HEALTH ──────────────────────────────────────────────────────────────────
-
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
 
-
-# ─── ORIGINAL EDIT (small books under 10k words) ─────────────────────────────
 
 @app.route("/edit-docx", methods=["POST"])
 def edit_docx():
@@ -79,16 +75,19 @@ def edit_docx():
         except Exception as e:
             return jsonify({"error": f"Claude API error at chunk {start}: {str(e)}"}), 500
 
-        edited_paras = [p.strip() for p in edited_text.split("<<<PARA>>>")]
+        edited_paras = [p.strip() for p in edited_text.split("<<<PARA>>>") if p.strip()]
         for j, idx in enumerate(indices):
             if j < len(edited_paras):
                 para = chunk[idx]
-                if para.runs:
-                    para.runs[0].text = edited_paras[j]
-                    for run in para.runs[1:]:
-                        run.text = ""
-                else:
-                    para.text = edited_paras[j]
+                try:
+                    if para.runs:
+                        para.runs[0].text = edited_paras[j]
+                        for run in para.runs[1:]:
+                            run.text = ""
+                    else:
+                        para.text = edited_paras[j]
+                except Exception:
+                    pass
 
     output = io.BytesIO()
     doc.save(output)
@@ -100,8 +99,6 @@ def edit_docx():
         download_name="edited.docx"
     )
 
-
-# ─── ASYNC EDIT (large books) ─────────────────────────────────────────────────
 
 def process_job(job_id, file_bytes, system_prompt):
     jobs[job_id]["status"] = "processing"
@@ -120,11 +117,13 @@ def process_job(job_id, file_bytes, system_prompt):
                 if text:
                     texts.append(text)
                     indices.append(i)
+
             if not texts:
                 jobs[job_id]["completed_chunks"] += 1
                 continue
 
             chunk_text = " <<<PARA>>> ".join(texts)
+
             try:
                 message = client.messages.create(
                     model="claude-sonnet-4-5",
@@ -146,16 +145,20 @@ def process_job(job_id, file_bytes, system_prompt):
                 jobs[job_id]["error"] = f"Claude API error at chunk {start}: {str(e)}"
                 return
 
-            edited_paras = [p.strip() for p in edited_text.split("<<<PARA>>>")]
+            edited_paras = [p.strip() for p in edited_text.split("<<<PARA>>>") if p.strip()]
+
             for j, idx in enumerate(indices):
                 if j < len(edited_paras):
                     para = chunk[idx]
-                    if para.runs:
-                        para.runs[0].text = edited_paras[j]
-                        for run in para.runs[1:]:
-                            run.text = ""
-                    else:
-                        para.text = edited_paras[j]
+                    try:
+                        if para.runs:
+                            para.runs[0].text = edited_paras[j]
+                            for run in para.runs[1:]:
+                                run.text = ""
+                        else:
+                            para.text = edited_paras[j]
+                    except Exception:
+                        pass
 
             jobs[job_id]["completed_chunks"] += 1
 
@@ -232,8 +235,6 @@ def job_result(job_id):
     )
 
 
-# ─── EXTRACT PARAGRAPHS ───────────────────────────────────────────────────────
-
 @app.route("/extract-paragraphs", methods=["POST"])
 def extract_paragraphs():
     if "file" not in request.files:
@@ -254,8 +255,6 @@ def extract_paragraphs():
         })
     return jsonify({"total": len(paragraphs), "paragraphs": paragraphs})
 
-
-# ─── EDIT BATCH ───────────────────────────────────────────────────────────────
 
 @app.route("/edit-batch", methods=["POST"])
 def edit_batch():
@@ -292,7 +291,7 @@ def edit_batch():
     except Exception as e:
         return jsonify({"error": f"Claude API error: {str(e)}"}), 500
 
-    edited_paras = [p.strip() for p in edited_text.split("<<<PARA>>>")]
+    edited_paras = [p.strip() for p in edited_text.split("<<<PARA>>>") if p.strip()]
     result = list(paragraphs)
     for j, para in enumerate(editable):
         if j < len(edited_paras):
@@ -301,8 +300,6 @@ def edit_batch():
 
     return jsonify({"paragraphs": result})
 
-
-# ─── REBUILD DOCX ─────────────────────────────────────────────────────────────
 
 @app.route("/rebuild-docx", methods=["POST"])
 def rebuild_docx():
@@ -326,12 +323,15 @@ def rebuild_docx():
     for i, para in enumerate(doc.paragraphs):
         if i in edited_map:
             new_text = edited_map[i]
-            if para.runs:
-                para.runs[0].text = new_text
-                for run in para.runs[1:]:
-                    run.text = ""
-            else:
-                para.text = new_text
+            try:
+                if para.runs:
+                    para.runs[0].text = new_text
+                    for run in para.runs[1:]:
+                        run.text = ""
+                else:
+                    para.text = new_text
+            except Exception:
+                pass
 
     output = io.BytesIO()
     doc.save(output)
@@ -343,8 +343,6 @@ def rebuild_docx():
         download_name="edited.docx"
     )
 
-
-# ─── CONVERT TO PDF ───────────────────────────────────────────────────────────
 
 @app.route("/convert-to-pdf", methods=["POST"])
 def convert_to_pdf():
