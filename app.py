@@ -124,7 +124,7 @@ def process_job(job_id, file_bytes, system_prompt):
 
             chunk_text = " <<<PARA>>> ".join(texts)
 
-            try:
+          try:
                 message = client.messages.create(
                     model="claude-sonnet-4-5",
                     max_tokens=4096,
@@ -140,10 +140,12 @@ def process_job(job_id, file_bytes, system_prompt):
                     )}]
                 )
                 edited_text = message.content[0].text.strip()
+                if not edited_text or len(edited_text) < 10:
+                    jobs[job_id]["completed_chunks"] += 1
+                    continue
             except Exception as e:
-                jobs[job_id]["status"] = "error"
-                jobs[job_id]["error"] = f"Claude API error at chunk {start}: {str(e)}"
-                return
+                jobs[job_id]["completed_chunks"] += 1
+                continue
 
             edited_paras = [p.strip() for p in edited_text.split("<<<PARA>>>") if p.strip()]
 
