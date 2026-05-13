@@ -124,7 +124,7 @@ def process_job(job_id, file_bytes, system_prompt):
 
             chunk_text = " <<<PARA>>> ".join(texts)
 
-          try:
+            try:
                 message = client.messages.create(
                     model="claude-sonnet-4-5",
                     max_tokens=4096,
