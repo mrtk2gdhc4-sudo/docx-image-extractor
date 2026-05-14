@@ -8,6 +8,8 @@ import requests
 import anthropic
 from flask import Flask, request, jsonify, send_file
 from docx import Document
+from docx.shared import Pt, Inches
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 app = Flask(__name__)
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
@@ -17,9 +19,56 @@ CHUNK_SIZE = 20
 jobs = {}
 
 
+def apply_house_style(doc):
+    for para in doc.paragraphs:
+        style_name = para.style.name.lower()
+        if 'heading' in style_name:
+            para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            para.paragraph_format.space_before = Pt(6)
+            para.paragraph_format.space_after = Pt(18)
+            para.paragraph_format.first_line_indent = Inches(0)
+            for run in para.runs:
+                run.bold = True
+                run.font.name = 'Times New Roman'
+                run.font.size = Pt(18)
+        else:
+            para.paragraph_format.line_spacing = Pt(18)
+            para.paragraph_format.first_line_indent = Inches(0.3)
+            para.paragraph_format.space_before = Pt(6)
+            para.paragraph_format.space_after = Pt(6)
+            para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+            for run in para.runs:
+                run.font.name = 'Times New Roman'
+                run.font.size = Pt(12)
+    return doc
+
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
+
+
+@app.route("/format-docx", methods=["POST"])
+def format_docx():
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+    try:
+        file_bytes = request.files["file"].read()
+        doc = Document(io.BytesIO(file_bytes))
+    except Exception as e:
+        return jsonify({"error": f"Failed to read docx: {str(e)}"}), 400
+
+    doc = apply_house_style(doc)
+
+    output = io.BytesIO()
+    doc.save(output)
+    output.seek(0)
+    return send_file(
+        output,
+        mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        as_attachment=True,
+        download_name="formatted.docx"
+    )
 
 
 @app.route("/edit-docx", methods=["POST"])
