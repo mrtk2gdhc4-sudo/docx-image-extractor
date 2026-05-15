@@ -43,6 +43,57 @@ def apply_house_style(doc):
     return doc
 
 
+def cloudconvert_job(job_payload, file_bytes, filename, mime_type):
+    headers = {
+        "Authorization": f"Bearer {CLOUDCONVERT_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    job_resp = requests.post(
+        "https://api.cloudconvert.com/v2/jobs",
+        json=job_payload, headers=headers, timeout=30
+    )
+    job_data = job_resp.json()
+    if job_resp.status_code != 201:
+        return None, f"CloudConvert job creation failed: {job_data}"
+
+    tasks = job_data.get("data", {}).get("tasks", [])
+    upload_task = next((t for t in tasks if t.get("name") == "import-file"), None)
+    if not upload_task:
+        return None, "No upload task found"
+
+    upload_url = upload_task.get("result", {}).get("form", {}).get("url")
+    upload_params = upload_task.get("result", {}).get("form", {}).get("parameters", {})
+    if not upload_url:
+        return None, "No upload URL from CloudConvert"
+
+    requests.post(
+        upload_url, data=upload_params,
+        files={"file": (filename, file_bytes, mime_type)},
+        timeout=60
+    )
+
+    job_id = job_data["data"]["id"]
+    for _ in range(30):
+        time.sleep(3)
+        status_resp = requests.get(
+            f"https://api.cloudconvert.com/v2/jobs/{job_id}",
+            headers=headers, timeout=15
+        )
+        status_data = status_resp.json()
+        job_status = status_data.get("data", {}).get("status")
+        if job_status == "finished":
+            export_task = next(
+                (t for t in status_data["data"]["tasks"] if t.get("name") == "export-file"), None
+            )
+            if export_task:
+                return export_task["result"]["files"][0]["url"], None
+            return None, "No export task found"
+        elif job_status == "error":
+            return None, f"CloudConvert error: {status_data}"
+
+    return None, "Timeout waiting for CloudConvert"
+
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
@@ -68,6 +119,50 @@ def format_docx():
         mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         as_attachment=True,
         download_name="formatted.docx"
+    )
+
+
+@app.route("/convert-pdf-to-docx", methods=["POST"])
+def convert_pdf_to_docx():
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+    if not CLOUDCONVERT_API_KEY:
+        return jsonify({"error": "CLOUDCONVERT_API_KEY not set"}), 500
+
+    file_bytes = request.files["file"].read()
+    filename = request.form.get("filename", "document.pdf")
+
+    job_payload = {
+        "tasks": {
+            "import-file": {"operation": "import/upload"},
+            "convert-file": {
+                "operation": "convert",
+                "input": "import-file",
+                "output_format": "docx",
+                "engine": "libreoffice"
+            },
+            "export-file": {
+                "operation": "export/url",
+                "input": "convert-file"
+            }
+        }
+    }
+
+    docx_url, error = cloudconvert_job(job_payload, file_bytes, filename, "application/pdf")
+    if error:
+        return jsonify({"error": error}), 500
+
+    try:
+        docx_resp = requests.get(docx_url, timeout=60)
+        docx_bytes = docx_resp.content
+    except Exception as e:
+        return jsonify({"error": f"Failed to download docx: {str(e)}"}), 500
+
+    return send_file(
+        io.BytesIO(docx_bytes),
+        mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        as_attachment=True,
+        download_name=filename.replace(".pdf", ".docx")
     )
 
 
@@ -408,11 +503,6 @@ def convert_to_pdf():
     page_width = request.form.get("page_width", "6")
     page_height = request.form.get("page_height", "9")
 
-    headers = {
-        "Authorization": f"Bearer {CLOUDCONVERT_API_KEY}",
-        "Content-Type": "application/json"
-    }
-
     job_payload = {
         "tasks": {
             "import-file": {"operation": "import/upload"},
@@ -431,63 +521,12 @@ def convert_to_pdf():
         }
     }
 
-    try:
-        job_resp = requests.post(
-            "https://api.cloudconvert.com/v2/jobs",
-            json=job_payload, headers=headers, timeout=30
-        )
-        job_data = job_resp.json()
-    except Exception as e:
-        return jsonify({"error": f"CloudConvert job creation failed: {str(e)}"}), 500
-
-    if job_resp.status_code != 201:
-        return jsonify({"error": "CloudConvert job creation failed", "details": job_data}), 500
-
-    tasks = job_data.get("data", {}).get("tasks", [])
-    upload_task = next((t for t in tasks if t.get("name") == "import-file"), None)
-    if not upload_task:
-        return jsonify({"error": "No upload task found"}), 500
-
-    upload_url = upload_task.get("result", {}).get("form", {}).get("url")
-    upload_params = upload_task.get("result", {}).get("form", {}).get("parameters", {})
-    if not upload_url:
-        return jsonify({"error": "No upload URL from CloudConvert"}), 500
-
-    try:
-        requests.post(
-            upload_url, data=upload_params,
-            files={"file": (filename, file_bytes, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
-            timeout=60
-        )
-    except Exception as e:
-        return jsonify({"error": f"File upload failed: {str(e)}"}), 500
-
-    job_id = job_data["data"]["id"]
-    pdf_url = None
-
-    for _ in range(30):
-        time.sleep(3)
-        try:
-            status_resp = requests.get(
-                f"https://api.cloudconvert.com/v2/jobs/{job_id}",
-                headers=headers, timeout=15
-            )
-            status_data = status_resp.json()
-            job_status = status_data.get("data", {}).get("status")
-            if job_status == "finished":
-                export_task = next(
-                    (t for t in status_data["data"]["tasks"] if t.get("name") == "export-file"), None
-                )
-                if export_task:
-                    pdf_url = export_task["result"]["files"][0]["url"]
-                break
-            elif job_status == "error":
-                return jsonify({"error": "CloudConvert conversion failed", "details": status_data}), 500
-        except Exception as e:
-            return jsonify({"error": f"Polling failed: {str(e)}"}), 500
-
-    if not pdf_url:
-        return jsonify({"error": "PDF URL not found after conversion"}), 500
+    pdf_url, error = cloudconvert_job(
+        job_payload, file_bytes, filename,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    if error:
+        return jsonify({"error": error}), 500
 
     try:
         pdf_resp = requests.get(pdf_url, timeout=60)
