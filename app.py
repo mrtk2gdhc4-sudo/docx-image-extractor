@@ -20,6 +20,34 @@ jobs = {}
 
 
 def apply_house_style(doc):
+    # Set Normal style defaults
+    try:
+        normal = doc.styles['Normal']
+        normal.font.name = 'Times New Roman'
+        normal.font.size = Pt(12)
+        normal.paragraph_format.line_spacing = Pt(18)
+        normal.paragraph_format.space_before = Pt(6)
+        normal.paragraph_format.space_after = Pt(6)
+        normal.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+        normal.paragraph_format.first_line_indent = Inches(0.3)
+    except Exception:
+        pass
+
+    # Set Heading styles
+    for i in range(1, 4):
+        try:
+            h = doc.styles[f'Heading {i}']
+            h.font.name = 'Times New Roman'
+            h.font.size = Pt(18)
+            h.font.bold = True
+            h.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            h.paragraph_format.space_before = Pt(6)
+            h.paragraph_format.space_after = Pt(18)
+            h.paragraph_format.first_line_indent = Inches(0)
+        except Exception:
+            pass
+
+    # Apply paragraph-level formatting only — never touch runs
     for para in doc.paragraphs:
         style_name = para.style.name.lower()
         if any(x in style_name for x in ['toc', 'table of', 'index', 'caption', 'header', 'footer']):
@@ -29,20 +57,13 @@ def apply_house_style(doc):
             para.paragraph_format.space_before = Pt(6)
             para.paragraph_format.space_after = Pt(18)
             para.paragraph_format.first_line_indent = Inches(0)
-            for run in para.runs:
-                run.bold = True
-                run.font.name = 'Times New Roman'
-                run.font.size = Pt(18)
         else:
             para.paragraph_format.line_spacing = Pt(18)
             para.paragraph_format.first_line_indent = Inches(0.3)
             para.paragraph_format.space_before = Pt(6)
             para.paragraph_format.space_after = Pt(6)
             para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-            for run in para.runs:
-                if run.text.strip():
-                    run.font.name = 'Times New Roman'
-                    run.font.size = Pt(12)
+
     return doc
 
 
@@ -111,9 +132,7 @@ def format_docx():
         doc = Document(io.BytesIO(file_bytes))
     except Exception as e:
         return jsonify({"error": f"Failed to read docx: {str(e)}"}), 400
-
     doc = apply_house_style(doc)
-
     output = io.BytesIO()
     doc.save(output)
     output.seek(0)
@@ -198,9 +217,7 @@ def resize_pdf():
         }
     }
 
-    pdf_url, error = cloudconvert_job(
-        job_payload, file_bytes, filename, "application/pdf"
-    )
+    pdf_url, error = cloudconvert_job(job_payload, file_bytes, filename, "application/pdf")
     if error:
         return jsonify({"error": error}), 500
 
@@ -555,6 +572,16 @@ def convert_to_pdf():
     page_width = request.form.get("page_width", "6")
     page_height = request.form.get("page_height", "9")
 
+    # Apply house style before converting
+    try:
+        doc = Document(io.BytesIO(file_bytes))
+        doc = apply_house_style(doc)
+        styled_output = io.BytesIO()
+        doc.save(styled_output)
+        file_bytes = styled_output.getvalue()
+    except Exception:
+        pass
+
     job_payload = {
         "tasks": {
             "import-file": {"operation": "import/upload"},
@@ -596,4 +623,4 @@ def convert_to_pdf():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", p=port)
+    app.run(host="0.0.0.0", port=port)
