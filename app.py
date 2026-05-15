@@ -141,8 +141,7 @@ def convert_pdf_to_docx():
             "convert-file": {
                 "operation": "convert",
                 "input": "import-file",
-                "output_format": "docx",
-                "engine": "libreoffice"
+                "output_format": "docx"
             },
             "export-file": {
                 "operation": "export/url",
@@ -166,6 +165,56 @@ def convert_pdf_to_docx():
         mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         as_attachment=True,
         download_name=filename.replace(".pdf", ".docx")
+    )
+
+
+@app.route("/resize-pdf", methods=["POST"])
+def resize_pdf():
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+    if not CLOUDCONVERT_API_KEY:
+        return jsonify({"error": "CLOUDCONVERT_API_KEY not set"}), 500
+
+    file_bytes = request.files["file"].read()
+    filename = request.form.get("filename", "document.pdf")
+    page_width = request.form.get("page_width", "6")
+    page_height = request.form.get("page_height", "9")
+
+    job_payload = {
+        "tasks": {
+            "import-file": {"operation": "import/upload"},
+            "convert-file": {
+                "operation": "convert",
+                "input": "import-file",
+                "output_format": "pdf",
+                "engine": "ghostscript",
+                "page_width": float(page_width),
+                "page_height": float(page_height)
+            },
+            "export-file": {
+                "operation": "export/url",
+                "input": "convert-file"
+            }
+        }
+    }
+
+    pdf_url, error = cloudconvert_job(
+        job_payload, file_bytes, filename, "application/pdf"
+    )
+    if error:
+        return jsonify({"error": error}), 500
+
+    try:
+        pdf_resp = requests.get(pdf_url, timeout=60)
+        pdf_bytes = pdf_resp.content
+    except Exception as e:
+        return jsonify({"error": f"Failed to download PDF: {str(e)}"}), 500
+
+    return send_file(
+        io.BytesIO(pdf_bytes),
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=filename
     )
 
 
@@ -547,4 +596,4 @@ def convert_to_pdf():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", p=port)
