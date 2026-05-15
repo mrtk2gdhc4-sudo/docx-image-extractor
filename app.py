@@ -73,8 +73,8 @@ def cloudconvert_job(job_payload, file_bytes, filename, mime_type):
     )
 
     job_id = job_data["data"]["id"]
-    for _ in range(30):
-        time.sleep(3)
+    for _ in range(60):
+        time.sleep(5)
         status_resp = requests.get(
             f"https://api.cloudconvert.com/v2/jobs/{job_id}",
             headers=headers, timeout=15
