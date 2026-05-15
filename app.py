@@ -22,7 +22,9 @@ jobs = {}
 def apply_house_style(doc):
     for para in doc.paragraphs:
         style_name = para.style.name.lower()
-        if 'heading' in style_name:
+        if any(x in style_name for x in ['toc', 'table of', 'index', 'caption', 'header', 'footer']):
+            pass
+        elif 'heading' in style_name:
             para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
             para.paragraph_format.space_before = Pt(6)
             para.paragraph_format.space_after = Pt(18)
@@ -38,8 +40,9 @@ def apply_house_style(doc):
             para.paragraph_format.space_after = Pt(6)
             para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
             for run in para.runs:
-                run.font.name = 'Times New Roman'
-                run.font.size = Pt(12)
+                if run.text.strip():
+                    run.font.name = 'Times New Roman'
+                    run.font.size = Pt(12)
     return doc
 
 
@@ -502,16 +505,6 @@ def convert_to_pdf():
     filename = request.form.get("filename", "document.docx")
     page_width = request.form.get("page_width", "6")
     page_height = request.form.get("page_height", "9")
-
-    # Apply house style before converting
-    try:
-        doc = Document(io.BytesIO(file_bytes))
-        doc = apply_house_style(doc)
-        styled_output = io.BytesIO()
-        doc.save(styled_output)
-        file_bytes = styled_output.getvalue()
-    except Exception:
-        pass
 
     job_payload = {
         "tasks": {
