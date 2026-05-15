@@ -503,6 +503,16 @@ def convert_to_pdf():
     page_width = request.form.get("page_width", "6")
     page_height = request.form.get("page_height", "9")
 
+    # Apply house style before converting
+    try:
+        doc = Document(io.BytesIO(file_bytes))
+        doc = apply_house_style(doc)
+        styled_output = io.BytesIO()
+        doc.save(styled_output)
+        file_bytes = styled_output.getvalue()
+    except Exception:
+        pass
+
     job_payload = {
         "tasks": {
             "import-file": {"operation": "import/upload"},
