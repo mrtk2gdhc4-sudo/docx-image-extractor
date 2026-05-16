@@ -47,8 +47,20 @@ def apply_house_style(doc):
         except Exception:
             pass
 
-    # Apply paragraph-level formatting only — never touch runs
-    for para in doc.paragraphs:
+    # Find where body text starts
+    # Skip title page — detect by finding first long paragraph (100+ chars)
+    body_start = 0
+    for i, para in enumerate(doc.paragraphs):
+        text = para.text.strip()
+        if len(text) > 100:
+            body_start = i
+            break
+
+    # Apply paragraph-level formatting to body text only
+    for i, para in enumerate(doc.paragraphs):
+        if i < body_start:
+            continue  # Skip title page paragraphs
+
         style_name = para.style.name.lower()
         if any(x in style_name for x in ['toc', 'table of', 'index', 'caption', 'header', 'footer']):
             pass
