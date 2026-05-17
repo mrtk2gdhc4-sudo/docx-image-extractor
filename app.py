@@ -18,14 +18,44 @@ CLOUDCONVERT_API_KEY = os.environ.get("CLOUDCONVERT_API_KEY")
 CHUNK_SIZE = 20
 jobs = {}
 
+WP_NS = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
+A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+PIC_NS = 'http://schemas.openxmlformats.org/drawingml/2006/picture'
+
 
 def para_has_drawing(para):
-    WP_NS = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
     for run in para.runs:
         for tag in ['{%s}inline' % WP_NS, '{%s}anchor' % WP_NS]:
             if run._r.find('.//' + tag) is not None:
                 return True
     return False
+
+
+def update_text_safely(para, new_text):
+    runs_with_drawings = set()
+    for i, run in enumerate(para.runs):
+        for tag in ['{%s}inline' % WP_NS, '{%s}anchor' % WP_NS]:
+            if run._r.find('.//' + tag) is not None:
+                runs_with_drawings.add(i)
+
+    if not runs_with_drawings:
+        if para.runs:
+            para.runs[0].text = new_text
+            for run in para.runs[1:]:
+                run.text = ""
+        else:
+            para.text = new_text
+    else:
+        # Paragraph has image runs — only touch non-image runs
+        first_text_run = None
+        for i, run in enumerate(para.runs):
+            if i not in runs_with_drawings:
+                if first_text_run is None:
+                    first_text_run = run
+                    run.text = new_text
+                else:
+                    run.text = ""
+        # If all runs are image runs, do nothing
 
 
 def apply_house_style(doc, page_width_inches=6, page_height_inches=9):
@@ -57,9 +87,6 @@ def apply_house_style(doc, page_width_inches=6, page_height_inches=9):
     EMU_PER_INCH = 914400
     margin_inches = 0.5
     max_width_emu = int((page_width_inches - 2 * margin_inches) * EMU_PER_INCH)
-    WP_NS = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
-    A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
-    PIC_NS = 'http://schemas.openxmlformats.org/drawingml/2006/picture'
 
     for para in doc.paragraphs:
         for run in para.runs:
@@ -317,6 +344,8 @@ def edit_docx():
         chunk = paragraphs[start: start + CHUNK_SIZE]
         texts, indices = [], []
         for i, para in enumerate(chunk):
+            if para_has_drawing(para):
+                continue
             text = para.text.strip()
             if text:
                 texts.append(text)
@@ -346,16 +375,7 @@ def edit_docx():
         edited_paras = [p.strip() for p in edited_text.split("<<<PARA>>>") if p.strip()]
         for j, idx in enumerate(indices):
             if j < len(edited_paras):
-                para = chunk[idx]
-                try:
-                    if para.runs:
-                        para.runs[0].text = edited_paras[j]
-                        for run in para.runs[1:]:
-                            run.text = ""
-                    else:
-                        para.text = edited_paras[j]
-                except Exception:
-                    pass
+                update_text_safely(chunk[idx], edited_paras[j])
 
     output = io.BytesIO()
     doc.save(output)
@@ -381,6 +401,8 @@ def process_job(job_id, file_bytes, system_prompt):
             chunk = paragraphs[start: start + CHUNK_SIZE]
             texts, indices = [], []
             for i, para in enumerate(chunk):
+                if para_has_drawing(para):
+                    continue
                 text = para.text.strip()
                 if text:
                     texts.append(text)
@@ -416,19 +438,9 @@ def process_job(job_id, file_bytes, system_prompt):
                 continue
 
             edited_paras = [p.strip() for p in edited_text.split("<<<PARA>>>") if p.strip()]
-
             for j, idx in enumerate(indices):
                 if j < len(edited_paras):
-                    para = chunk[idx]
-                    try:
-                        if para.runs:
-                            para.runs[0].text = edited_paras[j]
-                            for run in para.runs[1:]:
-                                run.text = ""
-                        else:
-                            para.text = edited_paras[j]
-                    except Exception:
-                        pass
+                    update_text_safely(chunk[idx], edited_paras[j])
 
             jobs[job_id]["completed_chunks"] += 1
 
@@ -592,16 +604,9 @@ def rebuild_docx():
     edited_map = {p["index"]: p["text"] for p in edited_paragraphs if p.get("edited")}
     for i, para in enumerate(doc.paragraphs):
         if i in edited_map:
-            new_text = edited_map[i]
-            try:
-                if para.runs:
-                    para.runs[0].text = new_text
-                    for run in para.runs[1:]:
-                        run.text = ""
-                else:
-                    para.text = new_text
-            except Exception:
-                pass
+            if para_has_drawing(para):
+                continue
+            update_text_safely(para, edited_map[i])
 
     output = io.BytesIO()
     doc.save(output)
@@ -643,7 +648,7 @@ def convert_to_pdf():
                 "operation": "convert",
                 "input": "import-file",
                 "output_format": "pdf",
-                "engine": "libreoffice",
+                "engine": "docx2pdf",
                 "page_width": float(page_width),
                 "page_height": float(page_height)
             },
