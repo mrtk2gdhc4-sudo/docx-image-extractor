@@ -57,6 +57,7 @@ def update_text_safely(para, new_text):
 
 
 def apply_house_style(doc, page_width_inches=6, page_height_inches=9):
+
     # 1. Normal style
     try:
         normal = doc.styles['Normal']
@@ -86,7 +87,7 @@ def apply_house_style(doc, page_width_inches=6, page_height_inches=9):
 
     # 3. Auto-resize images wider than page margins
     EMU_PER_INCH = 914400
-    max_width_emu = int((page_width_inches - 1.0) * EMU_PER_INCH)  # 0.5in margin each side
+    max_width_emu = int((page_width_inches - 1.0) * EMU_PER_INCH)
 
     for para in doc.paragraphs:
         for run in para.runs:
@@ -124,7 +125,7 @@ def apply_house_style(doc, page_width_inches=6, page_height_inches=9):
             body_start = i
             break
 
-    # 5. Paragraph-level formatting
+    # 5. Paragraph-level formatting — explicit on every paragraph
     for i, para in enumerate(doc.paragraphs):
         if i < body_start:
             continue
@@ -140,9 +141,10 @@ def apply_house_style(doc, page_width_inches=6, page_height_inches=9):
             para.paragraph_format.space_after = Pt(0)
         elif 'heading' in style_name:
             para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            para.paragraph_format.first_line_indent = Inches(0)
             para.paragraph_format.space_before = Pt(6)
             para.paragraph_format.space_after = Pt(18)
-            para.paragraph_format.first_line_indent = Inches(0)
+            para.paragraph_format.line_spacing = 1.5
         else:
             para.paragraph_format.line_spacing = 1.5
             para.paragraph_format.first_line_indent = Inches(0.3)
