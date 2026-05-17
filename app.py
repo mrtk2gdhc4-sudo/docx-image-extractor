@@ -19,7 +19,7 @@ CHUNK_SIZE = 20
 jobs = {}
 
 WP_NS = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
-A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+A_NS  = 'http://schemas.openxmlformats.org/drawingml/2006/main'
 PIC_NS = 'http://schemas.openxmlformats.org/drawingml/2006/picture'
 
 
@@ -46,24 +46,23 @@ def update_text_safely(para, new_text):
         else:
             para.text = new_text
     else:
-        # Paragraph has image runs — only touch non-image runs
-        first_text_run = None
+        first_done = False
         for i, run in enumerate(para.runs):
             if i not in runs_with_drawings:
-                if first_text_run is None:
-                    first_text_run = run
+                if not first_done:
                     run.text = new_text
+                    first_done = True
                 else:
                     run.text = ""
-        # If all runs are image runs, do nothing
 
 
 def apply_house_style(doc, page_width_inches=6, page_height_inches=9):
+    # 1. Normal style
     try:
         normal = doc.styles['Normal']
         normal.font.name = 'Times New Roman'
         normal.font.size = Pt(12)
-        normal.paragraph_format.line_spacing = Pt(18)
+        normal.paragraph_format.line_spacing = 1.5
         normal.paragraph_format.space_before = Pt(6)
         normal.paragraph_format.space_after = Pt(6)
         normal.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
@@ -71,6 +70,7 @@ def apply_house_style(doc, page_width_inches=6, page_height_inches=9):
     except Exception:
         pass
 
+    # 2. Heading styles
     for i in range(1, 4):
         try:
             h = doc.styles[f'Heading {i}']
@@ -84,9 +84,9 @@ def apply_house_style(doc, page_width_inches=6, page_height_inches=9):
         except Exception:
             pass
 
+    # 3. Auto-resize images wider than page margins
     EMU_PER_INCH = 914400
-    margin_inches = 0.5
-    max_width_emu = int((page_width_inches - 2 * margin_inches) * EMU_PER_INCH)
+    max_width_emu = int((page_width_inches - 1.0) * EMU_PER_INCH)  # 0.5in margin each side
 
     for para in doc.paragraphs:
         for run in para.runs:
@@ -117,30 +117,34 @@ def apply_house_style(doc, page_width_inches=6, page_height_inches=9):
                             ext.set('cx', str(new_cx))
                             ext.set('cy', str(new_cy))
 
+    # 4. Find body start — skip title page
     body_start = 0
     for i, para in enumerate(doc.paragraphs):
         if len(para.text.strip()) > 100:
             body_start = i
             break
 
+    # 5. Paragraph-level formatting
     for i, para in enumerate(doc.paragraphs):
         if i < body_start:
             continue
         style_name = para.style.name.lower()
+
         if any(x in style_name for x in ['toc', 'table of', 'index', 'caption', 'header', 'footer', 'vellum']):
             pass
         elif para_has_drawing(para):
-            para.paragraph_format.line_spacing = None
+            para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            para.paragraph_format.first_line_indent = Inches(0)
+            para.paragraph_format.line_spacing = 1.0
             para.paragraph_format.space_before = Pt(0)
             para.paragraph_format.space_after = Pt(0)
-            para.paragraph_format.first_line_indent = Inches(0)
         elif 'heading' in style_name:
             para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
             para.paragraph_format.space_before = Pt(6)
             para.paragraph_format.space_after = Pt(18)
             para.paragraph_format.first_line_indent = Inches(0)
         else:
-            para.paragraph_format.line_spacing = Pt(18)
+            para.paragraph_format.line_spacing = 1.5
             para.paragraph_format.first_line_indent = Inches(0.3)
             para.paragraph_format.space_before = Pt(6)
             para.paragraph_format.space_after = Pt(6)
@@ -648,7 +652,7 @@ def convert_to_pdf():
                 "operation": "convert",
                 "input": "import-file",
                 "output_format": "pdf",
-                "engine": "docx2pdf",
+                "engine": "libreoffice",
                 "page_width": float(page_width),
                 "page_height": float(page_height)
             },
