@@ -652,7 +652,7 @@ def convert_to_pdf():
                 "operation": "convert",
                 "input": "import-file",
                 "output_format": "pdf",
-                "engine": "libreoffice",
+                "engine": "calibre",
                 "page_width": float(page_width),
                 "page_height": float(page_height)
             },
