@@ -19,8 +19,16 @@ CHUNK_SIZE = 20
 jobs = {}
 
 
+def para_has_drawing(para):
+    WP_NS = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
+    for run in para.runs:
+        for tag in ['{%s}inline' % WP_NS, '{%s}anchor' % WP_NS]:
+            if run._r.find('.//' + tag) is not None:
+                return True
+    return False
+
+
 def apply_house_style(doc, page_width_inches=6, page_height_inches=9):
-    # Set Normal style defaults
     try:
         normal = doc.styles['Normal']
         normal.font.name = 'Times New Roman'
@@ -33,7 +41,6 @@ def apply_house_style(doc, page_width_inches=6, page_height_inches=9):
     except Exception:
         pass
 
-    # Set Heading styles
     for i in range(1, 4):
         try:
             h = doc.styles[f'Heading {i}']
@@ -47,7 +54,6 @@ def apply_house_style(doc, page_width_inches=6, page_height_inches=9):
         except Exception:
             pass
 
-    # Auto-resize images that exceed page margins
     EMU_PER_INCH = 914400
     margin_inches = 0.5
     max_width_emu = int((page_width_inches - 2 * margin_inches) * EMU_PER_INCH)
@@ -76,7 +82,6 @@ def apply_house_style(doc, page_width_inches=6, page_height_inches=9):
                 new_cy = int(cy * scale)
                 extent.set('cx', str(new_cx))
                 extent.set('cy', str(new_cy))
-                # Update inner graphic frame extents
                 for sp_pr in run._r.findall('.//{%s}spPr' % PIC_NS):
                     xfrm = sp_pr.find('{%s}xfrm' % A_NS)
                     if xfrm is not None:
@@ -85,19 +90,19 @@ def apply_house_style(doc, page_width_inches=6, page_height_inches=9):
                             ext.set('cx', str(new_cx))
                             ext.set('cy', str(new_cy))
 
-    # Find where body text starts — skip title page
     body_start = 0
     for i, para in enumerate(doc.paragraphs):
         if len(para.text.strip()) > 100:
             body_start = i
             break
 
-    # Apply paragraph-level formatting to body text only
     for i, para in enumerate(doc.paragraphs):
         if i < body_start:
             continue
         style_name = para.style.name.lower()
-        if any(x in style_name for x in ['toc', 'table of', 'index', 'caption', 'header', 'footer']):
+        if any(x in style_name for x in ['toc', 'table of', 'index', 'caption', 'header', 'footer', 'vellum']):
+            pass
+        elif para_has_drawing(para):
             pass
         elif 'heading' in style_name:
             para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -619,7 +624,6 @@ def convert_to_pdf():
     page_width = request.form.get("page_width", "6")
     page_height = request.form.get("page_height", "9")
 
-    # Apply house style with correct page dimensions before converting
     try:
         doc = Document(io.BytesIO(file_bytes))
         doc = apply_house_style(doc, page_width_inches=float(page_width), page_height_inches=float(page_height))
