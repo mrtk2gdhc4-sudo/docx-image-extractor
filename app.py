@@ -19,7 +19,7 @@ CHUNK_SIZE = 20
 jobs = {}
 
 
-def apply_house_style(doc):
+def apply_house_style(doc, page_width_inches=6, page_height_inches=9):
     # Set Normal style defaults
     try:
         normal = doc.styles['Normal']
@@ -47,20 +47,55 @@ def apply_house_style(doc):
         except Exception:
             pass
 
-    # Find where body text starts
-    # Skip title page — detect by finding first long paragraph (100+ chars)
+    # Auto-resize images that exceed page margins
+    EMU_PER_INCH = 914400
+    margin_inches = 0.5
+    max_width_emu = int((page_width_inches - 2 * margin_inches) * EMU_PER_INCH)
+    WP_NS = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
+    A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+    PIC_NS = 'http://schemas.openxmlformats.org/drawingml/2006/picture'
+
+    for para in doc.paragraphs:
+        for run in para.runs:
+            for drawing_tag in ['{%s}inline' % WP_NS, '{%s}anchor' % WP_NS]:
+                drawing = run._r.find('.//' + drawing_tag)
+                if drawing is None:
+                    continue
+                extent = drawing.find('{%s}extent' % WP_NS)
+                if extent is None:
+                    continue
+                try:
+                    cx = int(extent.get('cx', 0))
+                    cy = int(extent.get('cy', 0))
+                except (TypeError, ValueError):
+                    continue
+                if cx == 0 or cx <= max_width_emu:
+                    continue
+                scale = max_width_emu / cx
+                new_cx = max_width_emu
+                new_cy = int(cy * scale)
+                extent.set('cx', str(new_cx))
+                extent.set('cy', str(new_cy))
+                # Update inner graphic frame extents
+                for sp_pr in run._r.findall('.//{%s}spPr' % PIC_NS):
+                    xfrm = sp_pr.find('{%s}xfrm' % A_NS)
+                    if xfrm is not None:
+                        ext = xfrm.find('{%s}ext' % A_NS)
+                        if ext is not None:
+                            ext.set('cx', str(new_cx))
+                            ext.set('cy', str(new_cy))
+
+    # Find where body text starts — skip title page
     body_start = 0
     for i, para in enumerate(doc.paragraphs):
-        text = para.text.strip()
-        if len(text) > 100:
+        if len(para.text.strip()) > 100:
             body_start = i
             break
 
     # Apply paragraph-level formatting to body text only
     for i, para in enumerate(doc.paragraphs):
         if i < body_start:
-            continue  # Skip title page paragraphs
-
+            continue
         style_name = para.style.name.lower()
         if any(x in style_name for x in ['toc', 'table of', 'index', 'caption', 'header', 'footer']):
             pass
@@ -368,7 +403,7 @@ def process_job(job_id, file_bytes, system_prompt):
                 if not edited_text or len(edited_text) < 10:
                     jobs[job_id]["completed_chunks"] += 1
                     continue
-            except Exception as e:
+            except Exception:
                 jobs[job_id]["completed_chunks"] += 1
                 continue
 
@@ -584,10 +619,10 @@ def convert_to_pdf():
     page_width = request.form.get("page_width", "6")
     page_height = request.form.get("page_height", "9")
 
-    # Apply house style before converting
+    # Apply house style with correct page dimensions before converting
     try:
         doc = Document(io.BytesIO(file_bytes))
-        doc = apply_house_style(doc)
+        doc = apply_house_style(doc, page_width_inches=float(page_width), page_height_inches=float(page_height))
         styled_output = io.BytesIO()
         doc.save(styled_output)
         file_bytes = styled_output.getvalue()
