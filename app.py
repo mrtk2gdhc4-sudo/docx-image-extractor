@@ -103,7 +103,10 @@ def apply_house_style(doc, page_width_inches=6, page_height_inches=9):
         if any(x in style_name for x in ['toc', 'table of', 'index', 'caption', 'header', 'footer', 'vellum']):
             pass
         elif para_has_drawing(para):
-            pass
+            para.paragraph_format.line_spacing = None
+            para.paragraph_format.space_before = Pt(0)
+            para.paragraph_format.space_after = Pt(0)
+            para.paragraph_format.first_line_indent = Inches(0)
         elif 'heading' in style_name:
             para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
             para.paragraph_format.space_before = Pt(6)
