@@ -10,6 +10,7 @@ from flask import Flask, request, jsonify, send_file
 from docx import Document
 from docx.shared import Pt, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from lxml import etree
 
 app = Flask(__name__)
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
@@ -21,6 +22,7 @@ jobs = {}
 WP_NS = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
 A_NS  = 'http://schemas.openxmlformats.org/drawingml/2006/main'
 PIC_NS = 'http://schemas.openxmlformats.org/drawingml/2006/picture'
+W_NS  = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 
 
 def para_has_drawing(para):
@@ -56,6 +58,24 @@ def update_text_safely(para, new_text):
                     run.text = ""
 
 
+def strip_paragraph_formatting(para):
+    """Remove direct formatting overrides so house style wins."""
+    pPr = para._p.find('{%s}pPr' % W_NS)
+    if pPr is not None:
+        for tag in ['jc', 'ind', 'spacing', 'textAlignment', 'outlineLvl']:
+            el = pPr.find('{%s}%s' % (W_NS, tag))
+            if el is not None:
+                pPr.remove(el)
+    # Strip run-level colour, size, font overrides (but not bold/italic on headings)
+    for run in para.runs:
+        rPr = run._r.find('{%s}rPr' % W_NS)
+        if rPr is not None:
+            for tag in ['color', 'sz', 'szCs', 'rFonts', 'u', 'vertAlign']:
+                el = rPr.find('{%s}%s' % (W_NS, tag))
+                if el is not None:
+                    rPr.remove(el)
+
+
 def apply_house_style(doc, page_width_inches=6, page_height_inches=9):
 
     # 1. Normal style
@@ -78,6 +98,7 @@ def apply_house_style(doc, page_width_inches=6, page_height_inches=9):
             h.font.name = 'Times New Roman'
             h.font.size = Pt(18)
             h.font.bold = True
+            h.font.color.rgb = None  # reset colour to auto
             h.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
             h.paragraph_format.space_before = Pt(6)
             h.paragraph_format.space_after = Pt(18)
@@ -125,7 +146,7 @@ def apply_house_style(doc, page_width_inches=6, page_height_inches=9):
             body_start = i
             break
 
-    # 5. Paragraph-level formatting — explicit on every paragraph
+    # 5. Strip existing formatting + apply house style paragraph by paragraph
     for i, para in enumerate(doc.paragraphs):
         if i < body_start:
             continue
@@ -140,17 +161,28 @@ def apply_house_style(doc, page_width_inches=6, page_height_inches=9):
             para.paragraph_format.space_before = Pt(0)
             para.paragraph_format.space_after = Pt(0)
         elif 'heading' in style_name:
+            strip_paragraph_formatting(para)
             para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
             para.paragraph_format.first_line_indent = Inches(0)
             para.paragraph_format.space_before = Pt(6)
             para.paragraph_format.space_after = Pt(18)
             para.paragraph_format.line_spacing = 1.5
+            for run in para.runs:
+                run.font.name = 'Times New Roman'
+                run.font.size = Pt(18)
+                run.font.bold = True
+                run.font.color.rgb = None
         else:
+            strip_paragraph_formatting(para)
             para.paragraph_format.line_spacing = 1.5
             para.paragraph_format.first_line_indent = Inches(0.3)
             para.paragraph_format.space_before = Pt(6)
             para.paragraph_format.space_after = Pt(6)
             para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+            for run in para.runs:
+                run.font.name = 'Times New Roman'
+                run.font.size = Pt(12)
+                run.font.color.rgb = None
 
     return doc
 
