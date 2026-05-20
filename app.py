@@ -59,14 +59,12 @@ def update_text_safely(para, new_text):
 
 
 def strip_paragraph_formatting(para):
-    """Remove direct formatting overrides so house style wins."""
     pPr = para._p.find('{%s}pPr' % W_NS)
     if pPr is not None:
         for tag in ['jc', 'ind', 'spacing', 'textAlignment', 'outlineLvl']:
             el = pPr.find('{%s}%s' % (W_NS, tag))
             if el is not None:
                 pPr.remove(el)
-    # Strip run-level colour, size, font overrides (but not bold/italic on headings)
     for run in para.runs:
         rPr = run._r.find('{%s}rPr' % W_NS)
         if rPr is not None:
@@ -98,7 +96,7 @@ def apply_house_style(doc, page_width_inches=6, page_height_inches=9):
             h.font.name = 'Times New Roman'
             h.font.size = Pt(18)
             h.font.bold = True
-            h.font.color.rgb = None  # reset colour to auto
+            h.font.color.rgb = None
             h.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
             h.paragraph_format.space_before = Pt(6)
             h.paragraph_format.space_after = Pt(18)
@@ -139,14 +137,22 @@ def apply_house_style(doc, page_width_inches=6, page_height_inches=9):
                             ext.set('cx', str(new_cx))
                             ext.set('cy', str(new_cy))
 
-    # 4. Find body start — skip title page
+    # 4. Remove page breaks from empty paragraphs to prevent blank pages
+    for para in doc.paragraphs:
+        if not para.text.strip():
+            for run in para.runs:
+                for br in run._r.findall('.//{%s}br' % W_NS):
+                    if br.get('{%s}type' % W_NS) == 'page':
+                        run._r.remove(br)
+
+    # 5. Find body start — skip title page
     body_start = 0
     for i, para in enumerate(doc.paragraphs):
         if len(para.text.strip()) > 100:
             body_start = i
             break
 
-    # 5. Strip existing formatting + apply house style paragraph by paragraph
+    # 6. Paragraph-level formatting
     for i, para in enumerate(doc.paragraphs):
         if i < body_start:
             continue
