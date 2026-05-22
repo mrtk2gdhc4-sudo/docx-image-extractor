@@ -179,9 +179,16 @@ def apply_house_style(doc, page_width_inches=6, page_height_inches=9):
                 run.font.bold = True
                 run.font.color.rgb = None
         else:
+            # No indent on first paragraph after heading
+            prev_is_heading = False
+            if i > 0:
+                prev_style = doc.paragraphs[i - 1].style.name.lower()
+                if 'heading' in prev_style:
+                    prev_is_heading = True
+
             strip_paragraph_formatting(para)
             para.paragraph_format.line_spacing = 1.5
-            para.paragraph_format.first_line_indent = Inches(0.3)
+            para.paragraph_format.first_line_indent = Inches(0) if prev_is_heading else Inches(0.3)
             para.paragraph_format.space_before = Pt(6)
             para.paragraph_format.space_after = Pt(6)
             para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
