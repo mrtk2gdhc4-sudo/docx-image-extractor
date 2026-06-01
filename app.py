@@ -11,6 +11,7 @@ from docx import Document
 from docx.shared import Pt, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from lxml import etree
+from pypdf import PdfWriter, PdfReader
 
 app = Flask(__name__)
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
@@ -76,7 +77,6 @@ def strip_paragraph_formatting(para):
 
 def apply_house_style(doc, page_width_inches=6, page_height_inches=9):
 
-    # 1. Normal style
     try:
         normal = doc.styles['Normal']
         normal.font.name = 'Times New Roman'
@@ -89,7 +89,6 @@ def apply_house_style(doc, page_width_inches=6, page_height_inches=9):
     except Exception:
         pass
 
-    # 2. Heading styles
     for i in range(1, 4):
         try:
             h = doc.styles[f'Heading {i}']
@@ -104,7 +103,6 @@ def apply_house_style(doc, page_width_inches=6, page_height_inches=9):
         except Exception:
             pass
 
-    # 3. Auto-resize images wider than page margins
     EMU_PER_INCH = 914400
     max_width_emu = int((page_width_inches - 1.0) * EMU_PER_INCH)
 
@@ -137,7 +135,6 @@ def apply_house_style(doc, page_width_inches=6, page_height_inches=9):
                             ext.set('cx', str(new_cx))
                             ext.set('cy', str(new_cy))
 
-    # 4. Remove page breaks from empty paragraphs to prevent blank pages
     for para in doc.paragraphs:
         if not para.text.strip():
             for run in para.runs:
@@ -145,14 +142,12 @@ def apply_house_style(doc, page_width_inches=6, page_height_inches=9):
                     if br.get('{%s}type' % W_NS) == 'page':
                         run._r.remove(br)
 
-    # 5. Find body start — skip title page
     body_start = 0
     for i, para in enumerate(doc.paragraphs):
         if len(para.text.strip()) > 100:
             body_start = i
             break
 
-    # 6. Paragraph-level formatting
     for i, para in enumerate(doc.paragraphs):
         if i < body_start:
             continue
@@ -179,7 +174,6 @@ def apply_house_style(doc, page_width_inches=6, page_height_inches=9):
                 run.font.bold = True
                 run.font.color.rgb = None
         else:
-            # No indent on first paragraph after heading
             prev_is_heading = False
             if i > 0:
                 prev_style = doc.paragraphs[i - 1].style.name.lower()
@@ -729,6 +723,108 @@ def convert_to_pdf():
         as_attachment=True,
         download_name=filename.replace(".docx", ".pdf")
     )
+
+
+@app.route("/merge-pdfs", methods=["POST"])
+def merge_pdfs():
+    try:
+        if "files" not in request.files:
+            return jsonify({"error": "No files uploaded. Send PDFs as 'files' in multipart/form-data"}), 400
+
+        files = request.files.getlist("files")
+
+        if len(files) < 2:
+            return jsonify({"error": "Need at least 2 PDFs to merge"}), 400
+
+        output_filename = request.form.get("output_filename", "").strip()
+        if not output_filename:
+            output_filename = f"merged_{uuid.uuid4().hex[:8]}.pdf"
+        if not output_filename.lower().endswith(".pdf"):
+            output_filename += ".pdf"
+
+        merger = PdfWriter()
+        skipped_files = []
+        processed_files = []
+
+        for file in files:
+            if file.filename == "":
+                continue
+
+            if not file.filename.lower().endswith(".pdf"):
+                skipped_files.append({
+                    "file": file.filename,
+                    "reason": "Not a PDF file"
+                })
+                continue
+
+            try:
+                pdf_bytes = file.read()
+                pdf_stream = io.BytesIO(pdf_bytes)
+
+                reader = PdfReader(pdf_stream)
+                if reader.is_encrypted:
+                    skipped_files.append({
+                        "file": file.filename,
+                        "reason": "PDF is password-protected"
+                    })
+                    continue
+
+                pdf_stream.seek(0)
+                merger.append(pdf_stream)
+                processed_files.append(file.filename)
+
+            except Exception as e:
+                skipped_files.append({
+                    "file": file.filename,
+                    "reason": f"Processing error: {str(e)}"
+                })
+                continue
+
+        if len(processed_files) < 2:
+            return jsonify({
+                "error": "Not enough valid PDFs to merge",
+                "processed_count": len(processed_files),
+                "processed_files": processed_files,
+                "skipped_count": len(skipped_files),
+                "skipped_files": skipped_files
+            }), 400
+
+        output_stream = io.BytesIO()
+        merger.write(output_stream)
+        merger.close()
+        output_stream.seek(0)
+
+        print(f"Merged {len(processed_files)} PDFs into {output_filename}")
+        if skipped_files:
+            print(f"Skipped {len(skipped_files)} files: {skipped_files}")
+
+        return send_file(
+            output_stream,
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=output_filename
+        )
+
+    except Exception as e:
+        return jsonify({"error": f"Server error: {str(e)}"}), 500
+
+
+@app.route("/merge-pdfs/health", methods=["GET"])
+def merge_pdfs_health():
+    try:
+        test_writer = PdfWriter()
+        return jsonify({
+            "status": "ok",
+            "service": "pdf-merger",
+            "library": "pypdf",
+            "ready": True
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "service": "pdf-merger",
+            "error": str(e)
+        }), 500
 
 
 if __name__ == "__main__":
