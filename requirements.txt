@@ -3,3 +3,4 @@ python-docx
 anthropic
 requests
 gunicorn
+pypdf>=4.0.0
