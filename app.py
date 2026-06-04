@@ -7,6 +7,7 @@ import threading
 import requests
 import anthropic
 from flask import Flask, request, jsonify, send_file
+from flask_cors import CORS
 from docx import Document
 from docx.shared import Pt, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -14,6 +15,7 @@ from lxml import etree
 from pypdf import PdfWriter, PdfReader
 
 app = Flask(__name__)
+CORS(app)
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 CLOUDCONVERT_API_KEY = os.environ.get("CLOUDCONVERT_API_KEY")
 
